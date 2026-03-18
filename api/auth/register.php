@@ -51,6 +51,85 @@ function register_is_validation_error(string $message): bool {
     return strpos($message, 'document failed validation') !== false || strpos($message, 'schema') !== false || strpos($message, 'validation') !== false || strpos($message, 'wrong type') !== false;
 }
 
+function register_get_users_required_fields(): array {
+    static $requiredFields = null;
+    if ($requiredFields !== null) {
+        return $requiredFields;
+    }
+
+    $requiredFields = [];
+    try {
+        $db = Database::getConnection();
+        $collections = $db->listCollections(['filter' => ['name' => 'users']]);
+        foreach ($collections as $collectionInfo) {
+            if (!method_exists($collectionInfo, 'getOptions')) {
+                continue;
+            }
+            $options = Database::docToArray($collectionInfo->getOptions());
+            $validator = $options['validator'] ?? [];
+            $jsonSchema = $validator['$jsonSchema'] ?? [];
+            $required = $jsonSchema['required'] ?? [];
+            if (is_array($required)) {
+                $requiredFields = array_values(array_filter($required, 'is_string'));
+            }
+            break;
+        }
+    } catch (Throwable $e) {
+        error_log('[REGISTER_SCHEMA] ' . $e->getMessage());
+        $requiredFields = [];
+    }
+
+    return $requiredFields;
+}
+
+function register_default_value_for_field(string $field, array $baseDocument, $nowUtc, string $nowIso) {
+    switch ($field) {
+        case 'user_id':
+            return $baseDocument['user_id'] ?? null;
+        case 'username':
+            return $baseDocument['username'] ?? '';
+        case 'email':
+            return $baseDocument['email'] ?? '';
+        case 'password_hash':
+        case 'password':
+            return $baseDocument['password_hash'] ?? '';
+        case 'auth_token':
+            return $baseDocument['auth_token'] ?? '';
+        case 'is_active':
+            return 1;
+        case 'created_at':
+        case 'last_login':
+        case 'updated_at':
+            return $nowUtc;
+        default:
+            if (substr($field, -3) === '_id') {
+                return 0;
+            }
+            if (strpos($field, 'is_') === 0 || strpos($field, 'has_') === 0) {
+                return false;
+            }
+            if (strpos($field, '_at') !== false || strpos($field, 'date') !== false || strpos($field, 'time') !== false) {
+                return $nowIso;
+            }
+            return '';
+    }
+}
+
+function register_with_required_fields(array $variant, array $baseDocument, $nowUtc, string $nowIso): array {
+    $requiredFields = register_get_users_required_fields();
+    if (empty($requiredFields)) {
+        return $variant;
+    }
+
+    foreach ($requiredFields as $field) {
+        if (!array_key_exists($field, $variant) || $variant[$field] === null) {
+            $variant[$field] = register_default_value_for_field($field, $baseDocument, $nowUtc, $nowIso);
+        }
+    }
+
+    return $variant;
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
     echo json_encode(['success' => false, 'error' => 'Method not allowed']);
@@ -114,6 +193,19 @@ for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
 
         $nowUtc = Database::now();
         $nowIso = gmdate('c');
+        $baseDocument = [
+            'user_id' => (int)$candidateId,
+            'username' => $username,
+            'email' => $email,
+            'password' => $passwordHash,
+            'password_hash' => $passwordHash,
+            'auth_token' => $authToken,
+            'created_at' => $nowUtc,
+            'last_login' => $nowUtc,
+            'updated_at' => $nowUtc,
+            'is_active' => 1,
+        ];
+
         $insertVariants = [
             [
                 'user_id' => (int)$candidateId,
@@ -195,7 +287,56 @@ for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
                 }
 
                 if (register_is_validation_error($variantMessage)) {
-                    continue;
+                    try {
+                        $adaptedVariant = register_with_required_fields($variant, $baseDocument, $nowUtc, $nowIso);
+                        $users->insertOne($adaptedVariant);
+                        $userId = (int)$candidateId;
+                        $registered = true;
+                        $insertedThisAttempt = true;
+                        break;
+                    } catch (Throwable $adaptedError) {
+                        $lastErrorMessage = $adaptedError->getMessage();
+                        if (register_is_duplicate_error($adaptedError)) {
+                            $dupField = register_duplicate_field_from_error($adaptedError->getMessage());
+                            if ($dupField === 'email') {
+                                http_response_code(409);
+                                echo json_encode(['success' => false, 'error' => 'Email already in use']);
+                                exit;
+                            }
+                            if ($dupField === 'username') {
+                                http_response_code(409);
+                                echo json_encode(['success' => false, 'error' => 'Username already in use']);
+                                exit;
+                            }
+                            continue 2;
+                        }
+
+                        $adaptedMessage = strtolower($adaptedError->getMessage());
+                        if (register_is_permission_error($adaptedMessage)) {
+                            error_log('[REGISTER_AUTHZ] ' . $adaptedError->getMessage());
+                            $payload = ['success' => false, 'error' => 'Registration failed due to database permissions.'];
+                            if ($exposeErrorDetails) {
+                                $payload['details'] = $adaptedError->getMessage();
+                            }
+                            http_response_code(500);
+                            echo json_encode($payload);
+                            exit;
+                        }
+
+                        if (register_is_read_only_error($adaptedMessage)) {
+                            error_log('[REGISTER_READONLY] ' . $adaptedError->getMessage());
+                            $payload = ['success' => false, 'error' => 'Registration failed because the database is in read-only mode.'];
+                            if ($exposeErrorDetails) {
+                                $payload['details'] = $adaptedError->getMessage();
+                            }
+                            http_response_code(500);
+                            echo json_encode($payload);
+                            exit;
+                        }
+
+                        error_log('[REGISTER_SCHEMA_VALIDATION] ' . $adaptedError->getMessage());
+                        continue;
+                    }
                 }
 
                 if (register_is_permission_error($variantMessage)) {
