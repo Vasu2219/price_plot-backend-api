@@ -46,12 +46,11 @@ $passwordHash = password_hash($password, PASSWORD_BCRYPT);
 $authToken    = bin2hex(random_bytes(32));
 $userId = null;
 $registered = false;
-$maxAttempts = 8;
+$maxAttempts = 12;
 
 for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
     try {
-        $baseId = Database::nextId('users');
-        $candidateId = (int)$baseId + $attempt;
+        $candidateId = random_int(100000, 999999999);
 
         $existingId = $users->findOne(['user_id' => $candidateId]);
         if ($existingId) {
@@ -93,6 +92,13 @@ for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
             }
 
             continue;
+        }
+
+        if (strpos($errorText, 'not authorized') !== false || strpos($errorText, 'unauthorized') !== false) {
+            error_log('[REGISTER_AUTHZ] ' . $e->getMessage());
+            http_response_code(500);
+            echo json_encode(['success' => false, 'error' => 'Registration failed due to database permissions.']);
+            exit;
         }
 
         error_log('[REGISTER] ' . $e->getMessage());
