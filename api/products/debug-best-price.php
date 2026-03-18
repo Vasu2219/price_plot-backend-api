@@ -11,22 +11,34 @@ if (!$productId) {
     exit;
 }
 
-$db = Database::getConnection();
+$productsCollection = Database::collection('products');
+$pricesCollection = Database::collection('prices');
 
 // Get product info
-$stmt = $db->prepare('SELECT product_id, product_name, product_image_url FROM products WHERE product_id = ?');
-$stmt->execute([$productId]);
-$product = $stmt->fetch();
+$product = $productsCollection->findOne(['product_id' => $productId]);
+$product = Database::docToArray($product);
 
-if (!$product) {
+if (empty($product)) {
     echo json_encode(['success' => false, 'error' => 'Product not found']);
     exit;
 }
 
 // Get all prices for this product
-$stmt = $db->prepare('SELECT platform, price, currency, availability, product_link FROM prices WHERE product_id = ? ORDER BY price DESC');
-$stmt->execute([$productId]);
-$allPrices = $stmt->fetchAll();
+$allPrices = [];
+$cursor = $pricesCollection->find(
+    ['product_id' => $productId],
+    ['sort' => ['price' => -1]]
+);
+foreach ($cursor as $priceDoc) {
+    $price = Database::docToArray($priceDoc);
+    $allPrices[] = [
+        'platform' => $price['platform'] ?? 'Unknown',
+        'price' => isset($price['price']) ? (float)$price['price'] : null,
+        'currency' => $price['currency'] ?? 'INR',
+        'availability' => $price['availability'] ?? null,
+        'product_link' => $price['product_link'] ?? null,
+    ];
+}
 
 // Apply the same filtering logic as fetch_product.php
 $validPrices = array_filter($allPrices, fn($p) => $p['price'] && $p['price'] > 0);

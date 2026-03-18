@@ -16,8 +16,10 @@ if (!$productId) {
     exit;
 }
 
-$db = Database::getConnection();
-$db->prepare('DELETE FROM wishlist WHERE user_id = ? AND product_id = ?')
-   ->execute([$user['user_id'], $productId]);
+$wishlist = Database::collection('wishlist');
+$wishlist->deleteOne([
+    'user_id' => (int)$user['user_id'],
+    'product_id' => $productId,
+]);
 
 echo json_encode(['success' => true, 'message' => 'Removed from wishlist']);

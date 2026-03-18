@@ -13,30 +13,38 @@ if (!$productId) {
     exit;
 }
 
-$db = Database::getConnection();
+$products = Database::collection('products');
+$pricesCollection = Database::collection('prices');
 
-$prodStmt = $db->prepare('SELECT product_id, product_name FROM products WHERE product_id = ?');
-$prodStmt->execute([$productId]);
-$product = $prodStmt->fetch();
+$product = $products->findOne(['product_id' => $productId]);
+$product = Database::docToArray($product);
 
-if (!$product) {
+if (empty($product)) {
     http_response_code(404);
     echo json_encode(['success' => false, 'error' => 'Product not found']);
     exit;
 }
 
-$histStmt = $db->prepare(
-    'SELECT platform, price, currency, scraped_at
-     FROM prices WHERE product_id = ?
-     ORDER BY scraped_at DESC LIMIT 200'
+$history = [];
+$cursor = $pricesCollection->find(
+    ['product_id' => $productId],
+    ['sort' => ['scraped_at' => -1], 'limit' => 200]
 );
-$histStmt->execute([$productId]);
-$history = $histStmt->fetchAll();
+
+foreach ($cursor as $priceDoc) {
+    $priceData = Database::docToArray($priceDoc);
+    $history[] = [
+        'platform' => $priceData['platform'] ?? 'Unknown',
+        'price' => isset($priceData['price']) ? (float)$priceData['price'] : null,
+        'currency' => $priceData['currency'] ?? 'INR',
+        'scraped_at' => Database::toIsoString($priceData['scraped_at'] ?? null),
+    ];
+}
 
 echo json_encode([
     'success' => true,
     'data' => [
-        'productId'    => (int)$product['product_id'],
+        'productId'    => (int)$productId,
         'productName'  => $product['product_name'],
         'priceHistory' => $history,
     ]

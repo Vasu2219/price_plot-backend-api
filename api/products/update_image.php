@@ -30,11 +30,18 @@ if (!filter_var($imageUrl, FILTER_VALIDATE_URL)) {
     exit;
 }
 
-$db = Database::getConnection();
+$products = Database::collection('products');
 
 // Only update if the current image is NULL — don't overwrite a valid PHP-scraped image
-$db->prepare(
-    'UPDATE products SET product_image_url = ? WHERE product_id = ? AND (product_image_url IS NULL OR product_image_url = "")'
-)->execute([$imageUrl, $productId]);
+$products->updateOne(
+    [
+        'product_id' => $productId,
+        '$or' => [
+            ['product_image_url' => null],
+            ['product_image_url' => ''],
+        ],
+    ],
+    ['$set' => ['product_image_url' => $imageUrl]]
+);
 
 echo json_encode(['success' => true]);

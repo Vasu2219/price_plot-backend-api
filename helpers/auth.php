@@ -13,12 +13,14 @@ function requireAuth(): array {
         exit;
     }
 
-    $db   = Database::getConnection();
-    $stmt = $db->prepare('SELECT * FROM users WHERE auth_token = ? AND is_active = 1');
-    $stmt->execute([$token]);
-    $user = $stmt->fetch();
+    $users = Database::collection('users');
+    $user = $users->findOne([
+        'auth_token' => $token,
+        'is_active' => 1,
+    ]);
+    $user = Database::docToArray($user);
 
-    if (!$user) {
+    if (empty($user)) {
         http_response_code(401);
         echo json_encode(['success' => false, 'error' => 'Invalid or expired token']);
         exit;
@@ -36,12 +38,14 @@ function tryAuth(): ?array {
         throw new Exception('No authentication token provided');
     }
 
-    $db   = Database::getConnection();
-    $stmt = $db->prepare('SELECT * FROM users WHERE auth_token = ? AND is_active = 1');
-    $stmt->execute([$token]);
-    $user = $stmt->fetch();
+    $users = Database::collection('users');
+    $user = $users->findOne([
+        'auth_token' => $token,
+        'is_active' => 1,
+    ]);
+    $user = Database::docToArray($user);
 
-    if (!$user) {
+    if (empty($user)) {
         throw new Exception('Invalid or expired token');
     }
     return $user;

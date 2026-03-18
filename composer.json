@@ -1,0 +1,10 @@
+{
+  "name": "priceplot/php-api",
+  "description": "PricePlot PHP API with MongoDB backend",
+  "type": "project",
+  "require": {
+    "php": "^8.2",
+    "ext-mongodb": "*",
+    "mongodb/mongodb": "^1.19"
+  }
+}

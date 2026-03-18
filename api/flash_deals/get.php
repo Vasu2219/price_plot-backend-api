@@ -1,87 +1,114 @@
 <?php
-// api/flash_deals/get.php
 require_once '../../config/cors.php';
 require_once '../../config/database.php';
 
-$db = Database::getConnection();
+$productsCollection = Database::collection('products');
+$pricesCollection = Database::collection('prices');
+$flashDealsCollection = Database::collection('flash_deals');
 
-$latestPerPlatformSql = "
-    SELECT p1.product_id, p1.platform, p1.price, p1.product_link, p1.scraped_at
-    FROM prices p1
-    INNER JOIN (
-        SELECT product_id, platform, MAX(scraped_at) AS max_scraped
-        FROM prices
-        GROUP BY product_id, platform
-    ) p2
-      ON p2.product_id = p1.product_id
-     AND p2.platform = p1.platform
-     AND p2.max_scraped = p1.scraped_at
-";
+$products = [];
+foreach ($productsCollection->find(['is_active' => ['$ne' => 0]]) as $productDoc) {
+    $product = Database::docToArray($productDoc);
+    $productId = (int)($product['product_id'] ?? 0);
+    if ($productId <= 0) {
+        continue;
+    }
 
-$dynamicDealsSql = "
-    SELECT
-        agg.product_id,
-        products.product_name AS title,
-        products.product_image_url,
-        products.original_url,
-        agg.deal_price AS price,
-        agg.original_price,
-        ROUND(((agg.original_price - agg.deal_price) / NULLIF(agg.original_price, 0)) * 100) AS discount_pct,
-        (
-            SELECT lpp.platform
-            FROM (" . $latestPerPlatformSql . ") lpp
-            WHERE lpp.product_id = agg.product_id
-            ORDER BY lpp.price ASC, lpp.scraped_at DESC
-            LIMIT 1
-        ) AS platform,
-        (
-            SELECT lpp.product_link
-            FROM (" . $latestPerPlatformSql . ") lpp
-            WHERE lpp.product_id = agg.product_id
-            ORDER BY lpp.price ASC, lpp.scraped_at DESC
-            LIMIT 1
-        ) AS deal_url
-    FROM (
-        SELECT
-            lpp.product_id,
-            MIN(lpp.price) AS deal_price,
-            MAX(lpp.price) AS original_price,
-            COUNT(*) AS platform_count
-        FROM (" . $latestPerPlatformSql . ") lpp
-        GROUP BY lpp.product_id
-        HAVING COUNT(*) >= 2
-           AND MAX(lpp.price) > MIN(lpp.price)
-           AND MIN(lpp.price) > 0
-           AND MIN(lpp.price) >= (MAX(lpp.price) * 0.10)
-    ) agg
-    INNER JOIN products ON products.product_id = agg.product_id
-    WHERE products.is_active = 1
-    ORDER BY discount_pct DESC, products.last_scraped_at DESC
-    LIMIT 12
-";
+    $priceDocs = $pricesCollection->find(['product_id' => $productId]);
 
-$stmt = $db->prepare($dynamicDealsSql);
-$stmt->execute();
-$deals = $stmt->fetchAll();
+    $latestPerPlatform = [];
+    foreach ($priceDocs as $priceDoc) {
+        $price = Database::docToArray($priceDoc);
+        $platform = strtolower((string)($price['platform'] ?? ''));
+        if ($platform === '') {
+            continue;
+        }
 
-if (empty($deals)) {
-    $fallbackStmt = $db->prepare('SELECT * FROM flash_deals WHERE is_active = 1 ORDER BY deal_id ASC LIMIT 12');
-    $fallbackStmt->execute();
-    $fallbackDeals = $fallbackStmt->fetchAll();
+        $existing = $latestPerPlatform[$platform] ?? null;
+        $currentTs = strtotime((string)Database::toIsoString($price['scraped_at'] ?? null));
+        $existingTs = $existing ? strtotime((string)Database::toIsoString($existing['scraped_at'] ?? null)) : null;
 
-    foreach ($fallbackDeals as &$d) {
-        $d = [
-            'deal_id' => (int)$d['deal_id'],
+        if ($existing === null || $currentTs >= $existingTs) {
+            $latestPerPlatform[$platform] = $price;
+        }
+    }
+
+    if (count($latestPerPlatform) < 2) {
+        continue;
+    }
+
+    $validPrices = array_values(array_filter($latestPerPlatform, function ($p) {
+        return isset($p['price']) && (float)$p['price'] > 0;
+    }));
+
+    if (count($validPrices) < 2) {
+        continue;
+    }
+
+    usort($validPrices, fn($a, $b) => ((float)$a['price']) <=> ((float)$b['price']));
+    $dealPrice = (float)$validPrices[0]['price'];
+    $originalPrice = (float)$validPrices[count($validPrices) - 1]['price'];
+
+    if ($dealPrice <= 0 || $originalPrice <= $dealPrice || $dealPrice < ($originalPrice * 0.10)) {
+        continue;
+    }
+
+    $discountPct = (int)round((($originalPrice - $dealPrice) / $originalPrice) * 100);
+
+    $badge = 'WAIT';
+    if ($discountPct >= 45) {
+        $badge = 'BUY_NOW';
+    } elseif ($discountPct >= 30) {
+        $badge = 'MONITOR';
+    }
+
+    $products[] = [
+        'deal_id' => $productId,
+        'product_id' => $productId,
+        'title' => $product['product_name'] ?? 'Product',
+        'product_image_url' => $product['product_image_url'] ?? null,
+        'original_url' => $product['original_url'] ?? null,
+        'price' => $dealPrice,
+        'original_price' => $originalPrice,
+        'discount_pct' => $discountPct,
+        'platform' => $validPrices[0]['platform'] ?? 'Unknown',
+        'deal_url' => $validPrices[0]['product_link'] ?? ($product['original_url'] ?? '#'),
+        'badge' => $badge,
+        'emoji' => '',
+        'last_scraped' => Database::toIsoString($product['last_scraped_at'] ?? null),
+    ];
+}
+
+usort($products, function ($a, $b) {
+    if ($a['discount_pct'] === $b['discount_pct']) {
+        return strcmp((string)($b['last_scraped'] ?? ''), (string)($a['last_scraped'] ?? ''));
+    }
+    return $b['discount_pct'] <=> $a['discount_pct'];
+});
+
+$products = array_slice($products, 0, 12);
+
+if (empty($products)) {
+    $fallbackDeals = [];
+    $cursor = $flashDealsCollection->find(
+        ['is_active' => ['$ne' => 0]],
+        ['sort' => ['deal_id' => 1], 'limit' => 12]
+    );
+
+    foreach ($cursor as $dealDoc) {
+        $deal = Database::docToArray($dealDoc);
+        $fallbackDeals[] = [
+            'deal_id' => (int)($deal['deal_id'] ?? 0),
             'product_id' => 0,
-            'title' => $d['title'],
+            'title' => $deal['title'] ?? 'Deal',
             'product_image_url' => null,
             'original_url' => null,
-            'price' => (float)$d['price'],
-            'original_price' => (float)$d['original_price'],
-            'discount_pct' => (int)$d['discount_pct'],
-            'platform' => $d['platform'],
-            'deal_url' => $d['deal_url'] ?? '#',
-            'badge' => $d['badge'] ?? 'NONE',
+            'price' => isset($deal['price']) ? (float)$deal['price'] : 0,
+            'original_price' => isset($deal['original_price']) ? (float)$deal['original_price'] : 0,
+            'discount_pct' => (int)($deal['discount_pct'] ?? 0),
+            'platform' => $deal['platform'] ?? 'Unknown',
+            'deal_url' => $deal['deal_url'] ?? '#',
+            'badge' => $deal['badge'] ?? 'NONE',
             'emoji' => '',
         ];
     }
@@ -90,23 +117,4 @@ if (empty($deals)) {
     exit;
 }
 
-foreach ($deals as &$d) {
-    $discount = (int)($d['discount_pct'] ?? 0);
-    $badge = 'WAIT';
-    if ($discount >= 45) {
-        $badge = 'BUY_NOW';
-    } elseif ($discount >= 30) {
-        $badge = 'MONITOR';
-    }
-
-    $d['deal_id'] = (int)$d['product_id'];
-    $d['product_id'] = (int)$d['product_id'];
-    $d['price'] = (float)$d['price'];
-    $d['original_price'] = (float)$d['original_price'];
-    $d['discount_pct'] = $discount;
-    $d['deal_url'] = $d['deal_url'] ?: ($d['original_url'] ?: '#');
-    $d['badge'] = $badge;
-    $d['emoji'] = '';
-}
-
-echo json_encode(['success' => true, 'data' => $deals]);
+echo json_encode(['success' => true, 'data' => $products]);

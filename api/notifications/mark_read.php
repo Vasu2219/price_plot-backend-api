@@ -8,16 +8,23 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') { http_response_code(405); echo json_
 
 $user  = requireAuth();
 $input = json_decode(file_get_contents('php://input'), true);
-$db    = Database::getConnection();
+$notifications = Database::collection('notifications');
 
 if (isset($input['notification_id'])) {
     // Mark single
-    $db->prepare('UPDATE notifications SET is_read = 1 WHERE notification_id = ? AND user_id = ?')
-       ->execute([(int)$input['notification_id'], $user['user_id']]);
+    $notifications->updateOne(
+        [
+            'notification_id' => (int)$input['notification_id'],
+            'user_id' => (int)$user['user_id'],
+        ],
+        ['$set' => ['is_read' => 1]]
+    );
 } else {
     // Mark all
-    $db->prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ?')
-       ->execute([$user['user_id']]);
+    $notifications->updateMany(
+        ['user_id' => (int)$user['user_id']],
+        ['$set' => ['is_read' => 1]]
+    );
 }
 
 echo json_encode(['success' => true, 'message' => 'Marked as read']);

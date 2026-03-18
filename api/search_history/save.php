@@ -22,17 +22,21 @@ if (!$productId) {
     exit;
 }
 
-$db = Database::getConnection();
+$products = Database::collection('products');
+$searchHistory = Database::collection('search_history');
 
-// Upsert: if same product already in history, bump the timestamp so it sorts to top
-$stmt = $db->prepare(
-    'INSERT INTO search_history (user_id, product_id, searched_at)
-     VALUES (?, ?, NOW())
-     ON DUPLICATE KEY UPDATE searched_at = NOW()'
-);
+$product = $products->findOne(['product_id' => $productId]);
+if (!$product) {
+    http_response_code(404);
+    echo json_encode(['success' => false, 'error' => 'Product not found']);
+    exit;
+}
 
-// The UNIQUE constraint doesn't exist yet — just insert; duplicates are fine (show latest).
-// If the user wants de-duplication, add UNIQUE KEY in the table separately.
-$stmt->execute([$user['user_id'], $productId]);
+$searchHistory->insertOne([
+    'history_id' => Database::nextId('search_history'),
+    'user_id' => (int)$user['user_id'],
+    'product_id' => $productId,
+    'searched_at' => Database::now(),
+]);
 
 echo json_encode(['success' => true]);

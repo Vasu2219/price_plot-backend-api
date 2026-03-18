@@ -110,20 +110,35 @@ if ($platform === null) {
     exit;
 }
 
-$db      = Database::getConnection();
 $urlHash = hash('sha256', $productUrl);
+$productsCollection = Database::collection('products');
+$priceCacheCollection = Database::collection('price_cache');
+$scrapeRequestsCollection = Database::collection('scrape_requests');
 
 // ----- Cache check -----
 if (!$forceRefresh) {
-    $cacheStmt = $db->prepare(
-        'SELECT scraped_data FROM price_cache WHERE url_hash = ? AND (expires_at IS NULL OR expires_at > NOW())'
-    );
-    $cacheStmt->execute([$urlHash]);
-    $cached = $cacheStmt->fetch();
-    if ($cached) {
-        $db->prepare('UPDATE price_cache SET hit_count = hit_count + 1 WHERE url_hash = ?')
-           ->execute([$urlHash]);
-        $data              = json_decode($cached['scraped_data'], true);
+    $cached = $priceCacheCollection->findOne([
+        'url_hash' => $urlHash,
+        '$or' => [
+            ['expires_at' => null],
+            ['expires_at' => ['$gt' => Database::now()]],
+        ],
+    ]);
+    $cached = Database::docToArray($cached);
+
+    if (!empty($cached)) {
+        $priceCacheCollection->updateOne(
+            ['url_hash' => $urlHash],
+            ['$inc' => ['hit_count' => 1]]
+        );
+
+        $data = $cached['scraped_data'] ?? [];
+        if (is_string($data)) {
+            $data = json_decode($data, true);
+        }
+        if (!is_array($data)) {
+            $data = [];
+        }
         $data['fromCache'] = true;
         echo json_encode(['success' => true, 'data' => $data]);
         exit;
@@ -151,22 +166,21 @@ try {
 
 $responseTimeMs = (int)round((microtime(true) - $startTime) * 1000);
 
-// Log attempt
-try {
-    $logStmt = $db->prepare(
-        'INSERT INTO scrape_requests (user_id, product_url, request_ip, success, response_time_ms, error_message)
-         VALUES (?, ?, ?, ?, ?, ?)'
-    );
-} catch (Exception $e) {
-    error_log('[FETCH_PRODUCT] Logging table error: ' . $e->getMessage());
-}
-
 if (!$primary['success']) {
     $errMsg = $primary['error'] ?? 'Scraper returned no data';
     error_log('[FETCH_PRODUCT] Scraping failed: ' . $errMsg);
     
     try {
-        $logStmt->execute([$user['user_id'], $productUrl, $_SERVER['REMOTE_ADDR'] ?? null, 0, $responseTimeMs, $errMsg]);
+        $scrapeRequestsCollection->insertOne([
+            'request_id' => Database::nextId('scrape_requests'),
+            'user_id' => (int)$user['user_id'],
+            'product_url' => $productUrl,
+            'request_ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+            'success' => 0,
+            'response_time_ms' => $responseTimeMs,
+            'error_message' => $errMsg,
+            'requested_at' => Database::now(),
+        ]);
     } catch (Exception $e) {
         error_log('[FETCH_PRODUCT] Could not log failure: ' . $e->getMessage());
     }
@@ -181,7 +195,16 @@ if (!$primary['success']) {
 
 error_log('[FETCH_PRODUCT] Scrape successful, logging to database');
 try {
-    $logStmt->execute([$user['user_id'], $productUrl, $_SERVER['REMOTE_ADDR'] ?? null, 1, $responseTimeMs, null]);
+    $scrapeRequestsCollection->insertOne([
+        'request_id' => Database::nextId('scrape_requests'),
+        'user_id' => (int)$user['user_id'],
+        'product_url' => $productUrl,
+        'request_ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+        'success' => 1,
+        'response_time_ms' => $responseTimeMs,
+        'error_message' => null,
+        'requested_at' => Database::now(),
+    ]);
 } catch (Exception $e) {
     error_log('[FETCH_PRODUCT] Could not log success: ' . $e->getMessage());
 }
@@ -376,22 +399,36 @@ $recommendation = sprintf(
 );
 
 // ----- Upsert product record -----
-$existStmt = $db->prepare('SELECT product_id FROM products WHERE url_hash = ?');
-$existStmt->execute([$urlHash]);
-$existing = $existStmt->fetch();
+$existing = $productsCollection->findOne(['url_hash' => $urlHash]);
+$existing = Database::docToArray($existing);
 
-if ($existing) {
+if (!empty($existing)) {
     $productId = (int)$existing['product_id'];
-    $db->prepare(
-        'UPDATE products SET product_name = ?, product_image_url = ?,
-         last_scraped_at = NOW(), scrape_count = scrape_count + 1 WHERE product_id = ?'
-    )->execute([$productName, $productImage, $productId]);
-} else {
-    $ins = $db->prepare(
-        'INSERT INTO products (original_url, url_hash, product_name, product_image_url) VALUES (?, ?, ?, ?)'
+    $productsCollection->updateOne(
+        ['product_id' => $productId],
+        [
+            '$set' => [
+                'product_name' => $productName,
+                'product_image_url' => $productImage,
+                'last_scraped_at' => Database::now(),
+            ],
+            '$inc' => ['scrape_count' => 1],
+        ]
     );
-    $ins->execute([$productUrl, $urlHash, $productName, $productImage]);
-    $productId = (int)$db->lastInsertId();
+} else {
+    $productId = Database::nextId('products');
+    $productsCollection->insertOne([
+        'product_id' => $productId,
+        'original_url' => $productUrl,
+        'url_hash' => $urlHash,
+        'product_name' => $productName,
+        'product_image_url' => $productImage,
+        'category' => null,
+        'first_scraped_at' => Database::now(),
+        'last_scraped_at' => Database::now(),
+        'scrape_count' => 1,
+        'is_active' => 1,
+    ]);
 }
 
 // ----- Insert price history only when changed (skip NULL prices) -----
@@ -400,7 +437,6 @@ foreach ($prices as $pe) {
     // Only insert prices that have actual values (not null/0)
     if (!empty($pe['price']) && $pe['price'] > 0) {
         if (insertPriceIfChanged(
-            $db,
             $productId,
             $pe['platform'],
             $pe['price'],
@@ -447,15 +483,23 @@ $responseData = [
 ];
 
 // ----- Cache (1 hour) -----
-$db->prepare(
-    'INSERT INTO price_cache (url_hash, scraped_data, expires_at)
-     VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 HOUR))
-     ON DUPLICATE KEY UPDATE
-       scraped_data = VALUES(scraped_data),
-       expires_at   = VALUES(expires_at),
-       cached_at    = NOW(),
-       hit_count    = 0'
-)->execute([$urlHash, json_encode($responseData)]);
+$expiresAt = new MongoDB\BSON\UTCDateTime((int)((microtime(true) + 3600) * 1000));
+$priceCacheCollection->updateOne(
+    ['url_hash' => $urlHash],
+    [
+        '$set' => [
+            'scraped_data' => $responseData,
+            'expires_at' => $expiresAt,
+            'cached_at' => Database::now(),
+            'hit_count' => 0,
+        ],
+        '$setOnInsert' => [
+            'cache_id' => Database::nextId('price_cache'),
+            'url_hash' => $urlHash,
+        ],
+    ],
+    ['upsert' => true]
+);
 
 error_log('[fetch_product] Response ready for user. bestPrice: ' . $minPrice . ', platforms: ' . count($finalPrices));
 echo json_encode(['success' => true, 'data' => $responseData]);

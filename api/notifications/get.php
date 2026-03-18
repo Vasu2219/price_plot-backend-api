@@ -5,26 +5,31 @@ require_once '../../config/database.php';
 require_once '../../helpers/auth.php';
 
 $user = requireAuth();
-$db   = Database::getConnection();
+$notificationsCollection = Database::collection('notifications');
+$productsCollection = Database::collection('products');
 
-$stmt = $db->prepare(
-    'SELECT n.notification_id, n.product_id, n.message, n.old_price, n.new_price,
-            n.is_read, n.created_at, p.product_name, p.product_image_url
-     FROM notifications n
-     JOIN products p ON p.product_id = n.product_id
-     WHERE n.user_id = ?
-     ORDER BY n.created_at DESC
-     LIMIT 50'
+$cursor = $notificationsCollection->find(
+    ['user_id' => (int)$user['user_id']],
+    ['sort' => ['created_at' => -1], 'limit' => 50]
 );
-$stmt->execute([$user['user_id']]);
-$rows = $stmt->fetchAll();
 
-foreach ($rows as &$r) {
-    $r['notification_id'] = (int)$r['notification_id'];
-    $r['product_id']      = (int)$r['product_id'];
-    $r['is_read']         = (bool)$r['is_read'];
-    $r['old_price']       = $r['old_price'] !== null ? (float)$r['old_price'] : null;
-    $r['new_price']       = $r['new_price'] !== null ? (float)$r['new_price'] : null;
+$rows = [];
+foreach ($cursor as $notificationDoc) {
+    $notification = Database::docToArray($notificationDoc);
+    $product = $productsCollection->findOne(['product_id' => (int)$notification['product_id']]);
+    $product = Database::docToArray($product);
+
+    $rows[] = [
+        'notification_id' => (int)($notification['notification_id'] ?? 0),
+        'product_id' => (int)($notification['product_id'] ?? 0),
+        'message' => $notification['message'] ?? '',
+        'old_price' => isset($notification['old_price']) ? (float)$notification['old_price'] : null,
+        'new_price' => isset($notification['new_price']) ? (float)$notification['new_price'] : null,
+        'is_read' => (bool)($notification['is_read'] ?? false),
+        'created_at' => Database::toIsoString($notification['created_at'] ?? null),
+        'product_name' => $product['product_name'] ?? 'Price Alert',
+        'product_image_url' => $product['product_image_url'] ?? '',
+    ];
 }
 
 echo json_encode(['success' => true, 'data' => $rows]);

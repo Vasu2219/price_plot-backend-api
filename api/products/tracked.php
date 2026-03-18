@@ -4,83 +4,124 @@ require_once '../../config/database.php';
 require_once '../../helpers/auth.php';
 
 $user = requireAuth();
-$db = Database::getConnection();
+$userId = (int)$user['user_id'];
 
-$stmt = $db->prepare(
-    'SELECT
-        p.product_id,
-        p.product_name,
-        p.product_image_url,
-        p.original_url,
-        MAX(t.tracked_at) AS tracked_at,
-        MAX(t.in_cart) AS in_cart,
-        MAX(t.in_wishlist) AS in_wishlist,
-        w.target_price,
-        (SELECT MIN(pr.price) FROM prices pr WHERE pr.product_id = p.product_id) AS current_price,
-        (SELECT pr2.platform FROM prices pr2 WHERE pr2.product_id = p.product_id ORDER BY pr2.price ASC, pr2.scraped_at DESC LIMIT 1) AS best_platform,
-        (SELECT MIN(pr3.price) FROM prices pr3 WHERE pr3.product_id = p.product_id) AS historical_min_price,
-        (
-          SELECT MIN(pr4.price)
-          FROM prices pr4
-          WHERE pr4.product_id = p.product_id
-            AND pr4.scraped_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-        ) AS min_price_7d,
-        (
-          SELECT MIN(pr5.price)
-          FROM prices pr5
-          WHERE pr5.product_id = p.product_id
-            AND pr5.scraped_at < DATE_SUB(NOW(), INTERVAL 7 DAY)
-        ) AS min_price_before_7d
-     FROM (
-       SELECT c.product_id, c.added_at AS tracked_at, 1 AS in_cart, 0 AS in_wishlist
-       FROM cart c
-       WHERE c.user_id = ?
-       UNION ALL
-       SELECT w1.product_id, w1.added_at AS tracked_at, 0 AS in_cart, 1 AS in_wishlist
-       FROM wishlist w1
-       WHERE w1.user_id = ?
-     ) t
-     JOIN products p ON p.product_id = t.product_id
-     LEFT JOIN wishlist w ON w.user_id = ? AND w.product_id = p.product_id
-     GROUP BY p.product_id, p.product_name, p.product_image_url, p.original_url, w.target_price
-     ORDER BY tracked_at DESC'
-);
+$cartCollection = Database::collection('cart');
+$wishlistCollection = Database::collection('wishlist');
+$productsCollection = Database::collection('products');
+$pricesCollection = Database::collection('prices');
 
-$stmt->execute([$user['user_id'], $user['user_id'], $user['user_id']]);
-$rows = $stmt->fetchAll();
+$cartDocs = $cartCollection->find(['user_id' => $userId]);
+$wishDocs = $wishlistCollection->find(['user_id' => $userId]);
+
+$trackedMap = [];
+
+foreach ($cartDocs as $doc) {
+    $item = Database::docToArray($doc);
+    $productId = (int)$item['product_id'];
+    if (!isset($trackedMap[$productId])) {
+        $trackedMap[$productId] = [
+            'product_id' => $productId,
+            'tracked_at' => $item['added_at'] ?? null,
+            'in_cart' => true,
+            'in_wishlist' => false,
+            'target_price' => null,
+        ];
+    } else {
+        $trackedMap[$productId]['in_cart'] = true;
+        $trackedMap[$productId]['tracked_at'] = $trackedMap[$productId]['tracked_at'] ?: ($item['added_at'] ?? null);
+    }
+}
+
+foreach ($wishDocs as $doc) {
+    $item = Database::docToArray($doc);
+    $productId = (int)$item['product_id'];
+    if (!isset($trackedMap[$productId])) {
+        $trackedMap[$productId] = [
+            'product_id' => $productId,
+            'tracked_at' => $item['added_at'] ?? null,
+            'in_cart' => false,
+            'in_wishlist' => true,
+            'target_price' => isset($item['target_price']) ? (float)$item['target_price'] : null,
+        ];
+    } else {
+        $trackedMap[$productId]['in_wishlist'] = true;
+        if (isset($item['target_price'])) {
+            $trackedMap[$productId]['target_price'] = (float)$item['target_price'];
+        }
+        $trackedMap[$productId]['tracked_at'] = $trackedMap[$productId]['tracked_at'] ?: ($item['added_at'] ?? null);
+    }
+}
 
 $products = [];
-foreach ($rows as $row) {
-    $currentPrice = $row['current_price'] !== null ? (float)$row['current_price'] : null;
-    $historicalMinPrice = $row['historical_min_price'] !== null ? (float)$row['historical_min_price'] : null;
-    $targetPrice = $row['target_price'] !== null ? (float)$row['target_price'] : null;
-    $minPrice7d = $row['min_price_7d'] !== null ? (float)$row['min_price_7d'] : null;
-    $minPriceBefore7d = $row['min_price_before_7d'] !== null ? (float)$row['min_price_before_7d'] : null;
+$sevenDaysAgo = new DateTimeImmutable('-7 days');
+
+foreach ($trackedMap as $tracked) {
+    $productId = (int)$tracked['product_id'];
+    $productDoc = $productsCollection->findOne(['product_id' => $productId]);
+    $product = Database::docToArray($productDoc);
+
+    if (empty($product)) {
+        continue;
+    }
+
+    $priceDocs = $pricesCollection->find(['product_id' => $productId]);
+
+    $currentPrice = null;
+    $historicalMinPrice = null;
+    $bestPlatform = null;
+    $minPrice7d = null;
+    $minPriceBefore7d = null;
+
+    foreach ($priceDocs as $priceDoc) {
+        $price = Database::docToArray($priceDoc);
+        $priceValue = isset($price['price']) ? (float)$price['price'] : null;
+        if ($priceValue === null || $priceValue <= 0) {
+            continue;
+        }
+
+        if ($currentPrice === null || $priceValue < $currentPrice) {
+            $currentPrice = $priceValue;
+            $bestPlatform = $price['platform'] ?? null;
+        }
+
+        if ($historicalMinPrice === null || $priceValue < $historicalMinPrice) {
+            $historicalMinPrice = $priceValue;
+        }
+
+        $scrapedAtIso = Database::toIsoString($price['scraped_at'] ?? null);
+        if ($scrapedAtIso) {
+            $scrapedAt = new DateTimeImmutable($scrapedAtIso);
+            if ($scrapedAt >= $sevenDaysAgo) {
+                if ($minPrice7d === null || $priceValue < $minPrice7d) {
+                    $minPrice7d = $priceValue;
+                }
+            } else {
+                if ($minPriceBefore7d === null || $priceValue < $minPriceBefore7d) {
+                    $minPriceBefore7d = $priceValue;
+                }
+            }
+        }
+    }
 
     $priceChange7d = null;
     if ($minPrice7d !== null && $minPriceBefore7d !== null && $minPriceBefore7d > 0) {
         $priceChange7d = round((($minPrice7d - $minPriceBefore7d) / $minPriceBefore7d) * 100, 2);
     }
 
-    $isAtLowestPrice = false;
-    if ($currentPrice !== null && $historicalMinPrice !== null) {
-        $isAtLowestPrice = $currentPrice <= ($historicalMinPrice + 0.01);
-    }
-
-    $isAtTargetPrice = false;
-    if ($targetPrice !== null && $currentPrice !== null) {
-        $isAtTargetPrice = $currentPrice <= $targetPrice;
-    }
+    $targetPrice = $tracked['target_price'];
+    $isAtLowestPrice = $currentPrice !== null && $historicalMinPrice !== null ? $currentPrice <= ($historicalMinPrice + 0.01) : false;
+    $isAtTargetPrice = $targetPrice !== null && $currentPrice !== null ? $currentPrice <= $targetPrice : false;
 
     $products[] = [
-        'product_id' => (int)$row['product_id'],
-        'product_name' => $row['product_name'],
-        'product_image_url' => $row['product_image_url'],
-        'original_url' => $row['original_url'],
-        'tracked_at' => $row['tracked_at'],
-        'in_cart' => (bool)$row['in_cart'],
-        'in_wishlist' => (bool)$row['in_wishlist'],
-        'best_platform' => $row['best_platform'],
+        'product_id' => $productId,
+        'product_name' => $product['product_name'] ?? 'Product',
+        'product_image_url' => $product['product_image_url'] ?? null,
+        'original_url' => $product['original_url'] ?? '',
+        'tracked_at' => Database::toIsoString($tracked['tracked_at'] ?? null),
+        'in_cart' => (bool)$tracked['in_cart'],
+        'in_wishlist' => (bool)$tracked['in_wishlist'],
+        'best_platform' => $bestPlatform,
         'current_price' => $currentPrice,
         'historical_min_price' => $historicalMinPrice,
         'target_price' => $targetPrice,
@@ -89,6 +130,10 @@ foreach ($rows as $row) {
         'price_change_7d' => $priceChange7d,
     ];
 }
+
+usort($products, function ($a, $b) {
+    return strcmp((string)$b['tracked_at'], (string)$a['tracked_at']);
+});
 
 $totalProducts = count($products);
 $atLowestCount = count(array_filter($products, fn($product) => $product['is_at_lowest_price']));

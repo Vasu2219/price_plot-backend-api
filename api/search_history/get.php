@@ -6,47 +6,81 @@ require_once '../../config/database.php';
 require_once '../../helpers/auth.php';
 
 $user  = requireAuth();
-$db    = Database::getConnection();
 $limit = min((int)($_GET['limit'] ?? 50), 100);
 
-// Fetch distinct products searched, most recent first
-$stmt = $db->prepare(
-    'SELECT sh.history_id, sh.searched_at,
-            p.product_id, p.product_name, p.product_image_url, p.original_url
-     FROM search_history sh
-     JOIN products p ON p.product_id = sh.product_id
-     WHERE sh.user_id = ?
-     ORDER BY sh.searched_at DESC
-     LIMIT ?'
+$searchHistoryCollection = Database::collection('search_history');
+$productsCollection = Database::collection('products');
+$pricesCollection = Database::collection('prices');
+
+$rows = [];
+$historyCursor = $searchHistoryCollection->find(
+    ['user_id' => (int)$user['user_id']],
+    ['sort' => ['searched_at' => -1], 'limit' => $limit]
 );
-$stmt->execute([$user['user_id'], $limit]);
-$rows = $stmt->fetchAll();
+
+foreach ($historyCursor as $historyDoc) {
+    $history = Database::docToArray($historyDoc);
+    $product = $productsCollection->findOne(['product_id' => (int)$history['product_id']]);
+    $product = Database::docToArray($product);
+
+    if (empty($product)) {
+        continue;
+    }
+
+    $rows[] = [
+        'history_id' => (int)($history['history_id'] ?? 0),
+        'searched_at' => Database::toIsoString($history['searched_at'] ?? null),
+        'product_id' => (int)$product['product_id'],
+        'product_name' => $product['product_name'] ?? 'Product',
+        'product_image_url' => $product['product_image_url'] ?? '',
+        'original_url' => $product['original_url'] ?? '',
+    ];
+}
 
 $results = [];
 foreach ($rows as $row) {
-    // Load all prices for this product (latest per platform, excluding null/0 values)
-    $priceStmt = $db->prepare(
-        'SELECT platform, MIN(price) AS price, currency, availability, product_link
-         FROM prices
-         WHERE product_id = ? AND price > 0
-         GROUP BY platform
-         ORDER BY price ASC'
-    );
-    $priceStmt->execute([$row['product_id']]);
-    $prices = $priceStmt->fetchAll();
-    
-    // If no valid prices found, get all prices including null for reference
-    if (empty($prices)) {
-        $priceStmt = $db->prepare(
-            'SELECT platform, MIN(price) AS price, currency, availability, product_link
-             FROM prices
-             WHERE product_id = ?
-             GROUP BY platform
-             ORDER BY COALESCE(price, 999999) ASC'
-        );
-        $priceStmt->execute([$row['product_id']]);
-        $prices = $priceStmt->fetchAll();
+    $platformMap = [];
+    $priceCursor = $pricesCollection->find(['product_id' => (int)$row['product_id']]);
+    foreach ($priceCursor as $priceDoc) {
+        $priceData = Database::docToArray($priceDoc);
+        $platform = $priceData['platform'] ?? 'Unknown';
+        $key = strtolower($platform);
+        $value = isset($priceData['price']) ? (float)$priceData['price'] : null;
+
+        if (!isset($platformMap[$key])) {
+            $platformMap[$key] = [
+                'platform' => $platform,
+                'price' => $value,
+                'currency' => $priceData['currency'] ?? 'INR',
+                'availability' => $priceData['availability'] ?? null,
+                'product_link' => $priceData['product_link'] ?? null,
+            ];
+        } else {
+            $existing = $platformMap[$key]['price'];
+            if ($value !== null && ($existing === null || $value < $existing)) {
+                $platformMap[$key] = [
+                    'platform' => $platform,
+                    'price' => $value,
+                    'currency' => $priceData['currency'] ?? 'INR',
+                    'availability' => $priceData['availability'] ?? null,
+                    'product_link' => $priceData['product_link'] ?? null,
+                ];
+            }
+        }
     }
+
+    $prices = array_values($platformMap);
+    usort($prices, function ($a, $b) {
+        $ap = $a['price'];
+        $bp = $b['price'];
+        if ($ap === null) {
+            return 1;
+        }
+        if ($bp === null) {
+            return -1;
+        }
+        return $ap <=> $bp;
+    });
 
     $searchQuery = $row['product_name'];
     $searchLinks = [
@@ -67,8 +101,8 @@ foreach ($rows as $row) {
         'original_url'      => $row['original_url'],
         'prices'            => $prices,
         'search_links'      => $searchLinks,
-        'best_price'        => !empty($prices) && $prices[0]['price'] > 0 ? (float)$prices[0]['price'] : null,
-        'best_platform'     => !empty($prices) && $prices[0]['price'] > 0 ? $prices[0]['platform'] : null,
+        'best_price'        => !empty($prices) && isset($prices[0]['price']) && $prices[0]['price'] > 0 ? (float)$prices[0]['price'] : null,
+        'best_platform'     => !empty($prices) && isset($prices[0]['price']) && $prices[0]['price'] > 0 ? $prices[0]['platform'] : null,
     ];
 }
 

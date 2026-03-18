@@ -217,15 +217,14 @@ try {
 
     // Save chat messages to database (optional)
     try {
-        $db = Database::getConnection();
-        $db->prepare(
-            'INSERT INTO chat_history (user_id, user_message, assistant_message, model_used, created_at)
-             VALUES (?, ?, ?, ?, NOW())'
-        )->execute([
-            $user['user_id'],
-            $message,
-            $assistantMessage,
-            $OLLAMA_MODEL
+        $chatHistory = Database::collection('chat_history');
+        $chatHistory->insertOne([
+            'chat_id' => Database::nextId('chat_history'),
+            'user_id' => (int)($user['user_id'] ?? 0),
+            'user_message' => $message,
+            'assistant_message' => $assistantMessage,
+            'model_used' => $OLLAMA_MODEL,
+            'created_at' => Database::now(),
         ]);
     } catch (Exception $e) {
         error_log('[Chat] Database error: ' . $e->getMessage());

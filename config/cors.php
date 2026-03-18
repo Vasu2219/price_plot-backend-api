@@ -2,7 +2,7 @@
 // config/cors.php — CORS + JSON headers for Android API calls and Web App
 // Allow both mobile and web app requests
 
-$allowed_origins = [
+$default_allowed_origins = [
     'http://localhost:3000',
     'http://localhost:8080',
     'http://localhost:8081',
@@ -14,6 +14,13 @@ $allowed_origins = [
     'http://127.0.0.1:8080',
     'http://127.0.0.1:8081',
 ];
+
+$allowedOriginsEnv = getenv('ALLOWED_ORIGINS') ?: '';
+$allowed_origins = $default_allowed_origins;
+
+if (!empty($allowedOriginsEnv)) {
+    $allowed_origins = array_values(array_filter(array_map('trim', explode(',', $allowedOriginsEnv))));
+}
 
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 

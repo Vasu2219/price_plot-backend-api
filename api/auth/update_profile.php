@@ -16,12 +16,14 @@ if (empty($token)) {
     exit;
 }
 
-$db   = Database::getConnection();
-$stmt = $db->prepare('SELECT user_id FROM users WHERE auth_token = ? AND is_active = 1');
-$stmt->execute([$token]);
-$user = $stmt->fetch();
+$users = Database::collection('users');
+$user = $users->findOne([
+    'auth_token' => $token,
+    'is_active' => 1,
+]);
+$user = Database::docToArray($user);
 
-if (!$user) {
+if (empty($user)) {
     http_response_code(401);
     echo json_encode(['success' => false, 'error' => 'Invalid or expired token']);
     exit;
@@ -44,16 +46,20 @@ if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
 }
 
 // Email remains unique; usernames can repeat.
-$dup = $db->prepare('SELECT user_id FROM users WHERE email = ? AND user_id != ?');
-$dup->execute([$email, $user['user_id']]);
-if ($dup->fetch()) {
+$dup = $users->findOne([
+    'email' => $email,
+    'user_id' => ['$ne' => (int)$user['user_id']],
+]);
+if ($dup) {
     http_response_code(409);
     echo json_encode(['success' => false, 'error' => 'Email already in use']);
     exit;
 }
 
-$upd = $db->prepare('UPDATE users SET username = ?, email = ? WHERE user_id = ?');
-$upd->execute([$username, $email, $user['user_id']]);
+$users->updateOne(
+    ['user_id' => (int)$user['user_id']],
+    ['$set' => ['username' => $username, 'email' => $email]]
+);
 
 echo json_encode([
     'success'  => true,

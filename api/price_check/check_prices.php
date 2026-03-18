@@ -10,18 +10,33 @@ require_once '../../helpers/auth.php';
 require_once '../../helpers/price_history.php';
 
 $user = requireAuth();
-$db   = Database::getConnection();
+$userId = (int)$user['user_id'];
+
+$wishlistCollection = Database::collection('wishlist');
+$cartCollection = Database::collection('cart');
+$productsCollection = Database::collection('products');
+$pricesCollection = Database::collection('prices');
+$notificationsCollection = Database::collection('notifications');
 
 // Collect all distinct product_ids this user is tracking (wishlist + cart)
-$trackStmt = $db->prepare(
-    'SELECT DISTINCT product_id FROM (
-        SELECT product_id FROM wishlist WHERE user_id = ? AND alert_enabled = 1
-        UNION
-        SELECT product_id FROM cart WHERE user_id = ?
-     ) AS tracked'
-);
-$trackStmt->execute([$user['user_id'], $user['user_id']]);
-$tracked = $trackStmt->fetchAll(PDO::FETCH_COLUMN);
+$trackedMap = [];
+
+$wishlistDocs = $wishlistCollection->find([
+    'user_id' => $userId,
+    'alert_enabled' => 1,
+]);
+foreach ($wishlistDocs as $wishDoc) {
+    $wish = Database::docToArray($wishDoc);
+    $trackedMap[(int)$wish['product_id']] = true;
+}
+
+$cartDocs = $cartCollection->find(['user_id' => $userId]);
+foreach ($cartDocs as $cartDoc) {
+    $cart = Database::docToArray($cartDoc);
+    $trackedMap[(int)$cart['product_id']] = true;
+}
+
+$tracked = array_keys($trackedMap);
 
 if (empty($tracked)) {
     echo json_encode(['success' => true, 'data' => ['drops' => [], 'checked' => 0]]);
@@ -34,19 +49,31 @@ $inserted = 0;
 
 foreach ($tracked as $productId) {
     // Get the product URL
-    $prodStmt = $db->prepare('SELECT original_url, product_name FROM products WHERE product_id = ?');
-    $prodStmt->execute([$productId]);
-    $product = $prodStmt->fetch();
-    if (!$product) continue;
+    $product = $productsCollection->findOne(['product_id' => (int)$productId]);
+    $product = Database::docToArray($product);
+    if (empty($product)) continue;
 
     // Fetch yesterday's best price (min price across platforms)
-    $yestStmt = $db->prepare(
-        'SELECT MIN(price) AS min_price FROM prices
-         WHERE product_id = ?
-           AND scraped_at BETWEEN DATE_SUB(NOW(), INTERVAL 2 DAY) AND DATE_SUB(NOW(), INTERVAL 1 DAY)'
-    );
-    $yestStmt->execute([$productId]);
-    $yesterday = $yestStmt->fetchColumn();
+    $now = new DateTimeImmutable();
+    $from = new MongoDB\BSON\UTCDateTime((int)$now->modify('-2 day')->format('Uv'));
+    $to = new MongoDB\BSON\UTCDateTime((int)$now->modify('-1 day')->format('Uv'));
+
+    $yesterday = null;
+    $yesterdayCursor = $pricesCollection->find([
+        'product_id' => (int)$productId,
+        'scraped_at' => ['$gte' => $from, '$lte' => $to],
+        'price' => ['$gt' => 0],
+    ]);
+    foreach ($yesterdayCursor as $priceDoc) {
+        $priceData = Database::docToArray($priceDoc);
+        $priceVal = isset($priceData['price']) ? (float)$priceData['price'] : null;
+        if ($priceVal === null) {
+            continue;
+        }
+        if ($yesterday === null || $priceVal < $yesterday) {
+            $yesterday = $priceVal;
+        }
+    }
 
     // Call the scraper for today's prices
     $ch      = curl_init(SCRAPER_URL);
@@ -70,7 +97,6 @@ foreach ($tracked as $productId) {
     // Insert today's prices only when changed
     foreach ($scraped['prices'] as $p) {
         if (insertPriceIfChanged(
-            $db,
             $productId,
             $p['platform']     ?? 'Unknown',
             (float)($p['price'] ?? 0),
@@ -88,7 +114,7 @@ foreach ($tracked as $productId) {
     $todayBest = min(array_column($scraped['prices'], 'price'));
 
     // Compare with yesterday
-    if ($yesterday !== false && $yesterday !== null && (float)$yesterday > 0) {
+    if ($yesterday !== null && (float)$yesterday > 0) {
         $oldPrice = (float)$yesterday;
         $newPrice = (float)$todayBest;
 
@@ -99,11 +125,16 @@ foreach ($tracked as $productId) {
                      . " (Save ₹" . number_format($savings, 2) . ")";
 
             // Insert notification
-            $notifStmt = $db->prepare(
-                'INSERT INTO notifications (user_id, product_id, message, old_price, new_price)
-                 VALUES (?, ?, ?, ?, ?)'
-            );
-            $notifStmt->execute([$user['user_id'], $productId, $message, $oldPrice, $newPrice]);
+            $notificationsCollection->insertOne([
+                'notification_id' => Database::nextId('notifications'),
+                'user_id' => $userId,
+                'product_id' => (int)$productId,
+                'message' => $message,
+                'old_price' => $oldPrice,
+                'new_price' => $newPrice,
+                'is_read' => 0,
+                'created_at' => Database::now(),
+            ]);
 
             $drops[] = [
                 'product_id'   => (int)$productId,

@@ -5,18 +5,20 @@ function normalizePriceValue($value): float {
     return round((float)$value, 2);
 }
 
-function hasPriceChanged(PDO $db, int $productId, string $platform, float $price, string $currency, string $availability): bool {
-    $stmt = $db->prepare(
-        'SELECT price, currency, availability
-         FROM prices
-         WHERE product_id = ? AND platform = ?
-         ORDER BY scraped_at DESC
-         LIMIT 1'
+function hasPriceChanged(int $productId, string $platform, float $price, string $currency, string $availability): bool {
+    $prices = Database::collection('prices');
+    $last = $prices->findOne(
+        [
+            'product_id' => $productId,
+            'platform' => $platform,
+        ],
+        [
+            'sort' => ['scraped_at' => -1],
+        ]
     );
-    $stmt->execute([$productId, $platform]);
-    $last = $stmt->fetch();
+    $last = Database::docToArray($last);
 
-    if (!$last) {
+    if (empty($last)) {
         return true;
     }
 
@@ -31,7 +33,6 @@ function hasPriceChanged(PDO $db, int $productId, string $platform, float $price
 }
 
 function insertPriceIfChanged(
-    PDO $db,
     int $productId,
     string $platform,
     float $price,
@@ -47,22 +48,20 @@ function insertPriceIfChanged(
     $currency     = trim($currency) !== '' ? trim($currency) : 'INR';
     $availability = trim($availability) !== '' ? trim($availability) : 'In Stock';
 
-    if (!hasPriceChanged($db, $productId, $platform, $price, $currency, $availability)) {
+    if (!hasPriceChanged($productId, $platform, $price, $currency, $availability)) {
         return false;
     }
 
-    $stmt = $db->prepare(
-        'INSERT INTO prices (product_id, platform, price, currency, availability, product_link)
-         VALUES (?, ?, ?, ?, ?, ?)'
-    );
-
-    $stmt->execute([
-        $productId,
-        $platform,
-        normalizePriceValue($price),
-        $currency,
-        $availability,
-        trim($productLink),
+    $prices = Database::collection('prices');
+    $prices->insertOne([
+        'price_id' => Database::nextId('prices'),
+        'product_id' => $productId,
+        'platform' => $platform,
+        'price' => normalizePriceValue($price),
+        'currency' => $currency,
+        'availability' => $availability,
+        'product_link' => trim($productLink),
+        'scraped_at' => Database::now(),
     ]);
 
     return true;

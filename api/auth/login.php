@@ -19,12 +19,14 @@ if (empty($email) || empty($password)) {
     exit;
 }
 
-$db   = Database::getConnection();
-$stmt = $db->prepare('SELECT * FROM users WHERE email = ? AND is_active = 1');
-$stmt->execute([$email]);
-$user = $stmt->fetch();
+$users = Database::collection('users');
+$user = $users->findOne([
+    'email' => $email,
+    'is_active' => 1,
+]);
+$user = Database::docToArray($user);
 
-if (!$user || !password_verify($password, $user['password_hash'])) {
+if (empty($user) || !password_verify($password, $user['password_hash'])) {
     http_response_code(401);
     echo json_encode(['success' => false, 'error' => 'Invalid email or password']);
     exit;
@@ -32,8 +34,10 @@ if (!$user || !password_verify($password, $user['password_hash'])) {
 
 // Rotate auth token on each login
 $authToken = bin2hex(random_bytes(32));
-$db->prepare('UPDATE users SET auth_token = ?, last_login = NOW() WHERE user_id = ?')
-   ->execute([$authToken, $user['user_id']]);
+$users->updateOne(
+    ['user_id' => (int)$user['user_id']],
+    ['$set' => ['auth_token' => $authToken, 'last_login' => Database::now()]]
+);
 
 echo json_encode([
     'success' => true,

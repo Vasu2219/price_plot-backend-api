@@ -16,7 +16,10 @@ if (empty($token)) {
     exit;
 }
 
-$db = Database::getConnection();
-$db->prepare('UPDATE users SET auth_token = NULL WHERE auth_token = ?')->execute([$token]);
+$users = Database::collection('users');
+$users->updateOne(
+    ['auth_token' => $token],
+    ['$set' => ['auth_token' => null]]
+);
 
 echo json_encode(['success' => true, 'message' => 'Logged out successfully']);

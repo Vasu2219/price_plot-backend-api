@@ -17,10 +17,34 @@ if (!$productId) {
     exit;
 }
 
-$db = Database::getConnection();
-$db->prepare(
-    'INSERT INTO cart (user_id, product_id, quantity) VALUES (?, ?, ?)
-     ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)'
-)->execute([$user['user_id'], $productId, $quantity]);
+$products = Database::collection('products');
+$cart = Database::collection('cart');
+
+$product = $products->findOne(['product_id' => $productId]);
+if (!$product) {
+    http_response_code(404);
+    echo json_encode(['success' => false, 'error' => 'Product not found']);
+    exit;
+}
+
+$existing = $cart->findOne([
+    'user_id' => (int)$user['user_id'],
+    'product_id' => $productId,
+]);
+
+if ($existing) {
+    $cart->updateOne(
+        ['user_id' => (int)$user['user_id'], 'product_id' => $productId],
+        ['$inc' => ['quantity' => $quantity]]
+    );
+} else {
+    $cart->insertOne([
+        'cart_id' => Database::nextId('cart'),
+        'user_id' => (int)$user['user_id'],
+        'product_id' => $productId,
+        'quantity' => $quantity,
+        'added_at' => Database::now(),
+    ]);
+}
 
 echo json_encode(['success' => true, 'message' => 'Added to cart']);

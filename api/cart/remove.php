@@ -12,8 +12,10 @@ $productId = (int)($input['product_id'] ?? 0);
 
 if (!$productId) { http_response_code(400); echo json_encode(['success'=>false,'error'=>'product_id required']); exit; }
 
-$db = Database::getConnection();
-$db->prepare('DELETE FROM cart WHERE user_id = ? AND product_id = ?')
-   ->execute([$user['user_id'], $productId]);
+$cart = Database::collection('cart');
+$cart->deleteOne([
+   'user_id' => (int)$user['user_id'],
+   'product_id' => $productId,
+]);
 
 echo json_encode(['success' => true, 'message' => 'Removed from cart']);

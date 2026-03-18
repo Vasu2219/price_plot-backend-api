@@ -5,26 +5,65 @@ require_once '../../config/database.php';
 require_once '../../helpers/auth.php';
 
 $user = requireAuth();
-$db   = Database::getConnection();
+$cartCollection = Database::collection('cart');
+$productsCollection = Database::collection('products');
+$pricesCollection = Database::collection('prices');
 
-$stmt = $db->prepare(
-    'SELECT c.cart_id, c.product_id, c.quantity, c.added_at,
-            p.product_name, p.product_image_url,
-            (SELECT MIN(price) FROM prices WHERE product_id = c.product_id) AS current_price,
-            CASE
-              WHEN LOWER(p.original_url) LIKE \'%amazon%\' OR LOWER(p.original_url) LIKE \'%amzn%\' THEN \'Amazon\'
-              WHEN LOWER(p.original_url) LIKE \'%flipkart%\'  THEN \'Flipkart\'
-              WHEN LOWER(p.original_url) LIKE \'%snapdeal%\'  THEN \'Snapdeal\'
-              WHEN LOWER(p.original_url) LIKE \'%myntra%\'    THEN \'Myntra\'
-              WHEN LOWER(p.original_url) LIKE \'%croma%\'     THEN \'Croma\'
-              ELSE (SELECT platform FROM prices WHERE product_id = c.product_id ORDER BY price ASC LIMIT 1)
-            END AS platform
-     FROM cart c
-     JOIN products p ON p.product_id = c.product_id
-     WHERE c.user_id = ?
-     ORDER BY c.added_at DESC'
+$cursor = $cartCollection->find(
+  ['user_id' => (int)$user['user_id']],
+  ['sort' => ['added_at' => -1]]
 );
-$stmt->execute([$user['user_id']]);
-$items = $stmt->fetchAll();
+
+$items = [];
+foreach ($cursor as $cartDoc) {
+  $cartItem = Database::docToArray($cartDoc);
+  $product = $productsCollection->findOne(['product_id' => (int)$cartItem['product_id']]);
+  $product = Database::docToArray($product);
+
+  if (empty($product)) {
+    continue;
+  }
+
+  $priceCursor = $pricesCollection->find(
+    ['product_id' => (int)$cartItem['product_id'], 'price' => ['$gt' => 0]],
+    ['sort' => ['price' => 1, 'scraped_at' => -1]]
+  );
+
+  $lowestPrice = null;
+  $bestPlatform = null;
+  foreach ($priceCursor as $priceDoc) {
+    $priceData = Database::docToArray($priceDoc);
+    if ($lowestPrice === null || (float)$priceData['price'] < $lowestPrice) {
+      $lowestPrice = (float)$priceData['price'];
+      $bestPlatform = $priceData['platform'] ?? null;
+    }
+  }
+
+  $url = strtolower((string)($product['original_url'] ?? ''));
+  if (strpos($url, 'amazon') !== false || strpos($url, 'amzn') !== false) {
+    $platform = 'Amazon';
+  } elseif (strpos($url, 'flipkart') !== false) {
+    $platform = 'Flipkart';
+  } elseif (strpos($url, 'snapdeal') !== false) {
+    $platform = 'Snapdeal';
+  } elseif (strpos($url, 'myntra') !== false) {
+    $platform = 'Myntra';
+  } elseif (strpos($url, 'croma') !== false) {
+    $platform = 'Croma';
+  } else {
+    $platform = $bestPlatform;
+  }
+
+  $items[] = [
+    'cart_id' => (int)($cartItem['cart_id'] ?? 0),
+    'product_id' => (int)$cartItem['product_id'],
+    'quantity' => (int)($cartItem['quantity'] ?? 1),
+    'added_at' => Database::toIsoString($cartItem['added_at'] ?? null),
+    'product_name' => $product['product_name'] ?? 'Product',
+    'product_image_url' => $product['product_image_url'] ?? '',
+    'current_price' => $lowestPrice,
+    'platform' => $platform,
+  ];
+}
 
 echo json_encode(['success' => true, 'data' => $items]);

@@ -27,12 +27,12 @@ if (!$productId || !is_array($prices) || empty($prices)) {
     exit;
 }
 
-$db = Database::getConnection();
+$productsCollection = Database::collection('products');
+$priceCacheCollection = Database::collection('price_cache');
 
 // Verify product exists and belongs to a valid record
-$check = $db->prepare('SELECT product_id FROM products WHERE product_id = ?');
-$check->execute([$productId]);
-if (!$check->fetch()) {
+$product = $productsCollection->findOne(['product_id' => $productId]);
+if (!$product) {
     http_response_code(404);
     echo json_encode(['success' => false, 'error' => 'Product not found']);
     exit;
@@ -48,17 +48,20 @@ foreach ($prices as $p) {
 
     if (empty($platform) || $price === null || $price < 1) continue;
 
-    if (insertPriceIfChanged($db, $productId, $platform, $price, $currency, $availability, $link)) {
+    if (insertPriceIfChanged($productId, $platform, $price, $currency, $availability, $link)) {
         $inserted++;
     }
 }
 
 // Also update the product's last_scraped_at timestamp
-$db->prepare('UPDATE products SET last_scraped_at = NOW() WHERE product_id = ?')
-   ->execute([$productId]);
+$productsCollection->updateOne(
+    ['product_id' => $productId],
+    ['$set' => ['last_scraped_at' => Database::now()]]
+);
 
 // Invalidate the cache so the next fetch_product.php call returns fresh data
-$db->prepare('DELETE FROM price_cache WHERE scraped_data LIKE ?')
-   ->execute(['%"productId":' . $productId . '%']);
+$priceCacheCollection->deleteMany([
+    'scraped_data.productId' => $productId,
+]);
 
 echo json_encode(['success' => true, 'inserted' => $inserted]);

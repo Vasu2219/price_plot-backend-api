@@ -18,20 +18,31 @@ if (!$productId) {
     exit;
 }
 
-$db = Database::getConnection();
+$products = Database::collection('products');
+$wishlist = Database::collection('wishlist');
 
 // Verify product exists
-$check = $db->prepare('SELECT product_id FROM products WHERE product_id = ?');
-$check->execute([$productId]);
-if (!$check->fetch()) {
+$product = $products->findOne(['product_id' => $productId]);
+if (!$product) {
     http_response_code(404);
     echo json_encode(['success' => false, 'error' => 'Product not found']);
     exit;
 }
 
-$stmt = $db->prepare(
-    'INSERT IGNORE INTO wishlist (user_id, product_id, target_price, alert_enabled) VALUES (?, ?, ?, 1)'
-);
-$stmt->execute([$user['user_id'], $productId, $targetPrice]);
+$existing = $wishlist->findOne([
+    'user_id' => (int)$user['user_id'],
+    'product_id' => $productId,
+]);
+
+if (!$existing) {
+    $wishlist->insertOne([
+        'wishlist_id' => Database::nextId('wishlist'),
+        'user_id' => (int)$user['user_id'],
+        'product_id' => $productId,
+        'target_price' => $targetPrice,
+        'alert_enabled' => 1,
+        'added_at' => Database::now(),
+    ]);
+}
 
 echo json_encode(['success' => true, 'message' => 'Added to wishlist']);

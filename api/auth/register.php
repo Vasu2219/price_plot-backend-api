@@ -32,12 +32,11 @@ if (strlen($password) < 6) {
     exit;
 }
 
-$db = Database::getConnection();
+$users = Database::collection('users');
 
 // Email is the only unique login identifier.
-$stmt = $db->prepare('SELECT user_id FROM users WHERE email = ?');
-$stmt->execute([$email]);
-if ($stmt->fetch()) {
+$existing = $users->findOne(['email' => $email]);
+if ($existing) {
     http_response_code(409);
     echo json_encode(['success' => false, 'error' => 'Email already in use']);
     exit;
@@ -45,12 +44,18 @@ if ($stmt->fetch()) {
 
 $passwordHash = password_hash($password, PASSWORD_BCRYPT);
 $authToken    = bin2hex(random_bytes(32));
+$userId       = Database::nextId('users');
 
-$stmt = $db->prepare(
-    'INSERT INTO users (username, email, password_hash, auth_token, last_login) VALUES (?, ?, ?, ?, NOW())'
-);
-$stmt->execute([$username, $email, $passwordHash, $authToken]);
-$userId = $db->lastInsertId();
+$users->insertOne([
+    'user_id' => $userId,
+    'username' => $username,
+    'email' => $email,
+    'password_hash' => $passwordHash,
+    'auth_token' => $authToken,
+    'created_at' => Database::now(),
+    'last_login' => Database::now(),
+    'is_active' => 1,
+]);
 
 echo json_encode([
     'success' => true,

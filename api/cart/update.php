@@ -17,14 +17,18 @@ if (!$productId) {
     exit;
 }
 
-$db = Database::getConnection();
+$cart = Database::collection('cart');
 
 if ($quantity <= 0) {
-    $db->prepare('DELETE FROM cart WHERE user_id = ? AND product_id = ?')
-       ->execute([$user['user_id'], $productId]);
+    $cart->deleteOne([
+        'user_id' => (int)$user['user_id'],
+        'product_id' => $productId,
+    ]);
     echo json_encode(['success' => true, 'message' => 'Item removed from cart']);
 } else {
-    $db->prepare('UPDATE cart SET quantity = ? WHERE user_id = ? AND product_id = ?')
-       ->execute([$quantity, $user['user_id'], $productId]);
+    $cart->updateOne(
+        ['user_id' => (int)$user['user_id'], 'product_id' => $productId],
+        ['$set' => ['quantity' => $quantity]]
+    );
     echo json_encode(['success' => true, 'message' => 'Cart updated']);
 }
