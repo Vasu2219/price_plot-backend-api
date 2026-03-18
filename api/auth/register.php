@@ -44,30 +44,67 @@ if ($existing) {
 
 $passwordHash = password_hash($password, PASSWORD_BCRYPT);
 $authToken    = bin2hex(random_bytes(32));
-try {
-    $userId       = Database::nextId('users');
+$userId = null;
+$registered = false;
+$maxAttempts = 8;
 
-    $users->insertOne([
-        'user_id' => $userId,
-        'username' => $username,
-        'email' => $email,
-        'password_hash' => $passwordHash,
-        'auth_token' => $authToken,
-        'created_at' => Database::now(),
-        'last_login' => Database::now(),
-        'is_active' => 1,
-    ]);
-} catch (Throwable $e) {
-    $errorText = strtolower($e->getMessage());
-    if (strpos($errorText, 'duplicate key') !== false || strpos($errorText, 'e11000') !== false) {
-        http_response_code(409);
-        echo json_encode(['success' => false, 'error' => 'Email already in use']);
+for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
+    try {
+        $baseId = Database::nextId('users');
+        $candidateId = (int)$baseId + $attempt;
+
+        $existingId = $users->findOne(['user_id' => $candidateId]);
+        if ($existingId) {
+            continue;
+        }
+
+        $users->insertOne([
+            'user_id' => $candidateId,
+            'username' => $username,
+            'email' => $email,
+            'password_hash' => $passwordHash,
+            'auth_token' => $authToken,
+            'created_at' => Database::now(),
+            'last_login' => Database::now(),
+            'is_active' => 1,
+        ]);
+
+        $userId = $candidateId;
+        $registered = true;
+        break;
+    } catch (Throwable $e) {
+        $errorText = strtolower($e->getMessage());
+
+        if (strpos($errorText, 'duplicate key') !== false || strpos($errorText, 'e11000') !== false) {
+            if (strpos($errorText, 'email') !== false) {
+                http_response_code(409);
+                echo json_encode(['success' => false, 'error' => 'Email already in use']);
+                exit;
+            }
+
+            if (strpos($errorText, 'username') !== false) {
+                http_response_code(409);
+                echo json_encode(['success' => false, 'error' => 'Username already in use']);
+                exit;
+            }
+
+            if (strpos($errorText, 'user_id') !== false || strpos($errorText, 'userid') !== false || strpos($errorText, 'users.$') !== false) {
+                continue;
+            }
+
+            continue;
+        }
+
+        error_log('[REGISTER] ' . $e->getMessage());
+        http_response_code(500);
+        echo json_encode(['success' => false, 'error' => 'Registration failed. Please try again.']);
         exit;
     }
+}
 
-    error_log('[REGISTER] ' . $e->getMessage());
+if (!$registered || $userId === null) {
     http_response_code(500);
-    echo json_encode(['success' => false, 'error' => 'Registration failed. Please try again.']);
+    echo json_encode(['success' => false, 'error' => 'Registration failed. Please retry.']);
     exit;
 }
 
