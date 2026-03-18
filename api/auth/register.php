@@ -44,18 +44,32 @@ if ($existing) {
 
 $passwordHash = password_hash($password, PASSWORD_BCRYPT);
 $authToken    = bin2hex(random_bytes(32));
-$userId       = Database::nextId('users');
+try {
+    $userId       = Database::nextId('users');
 
-$users->insertOne([
-    'user_id' => $userId,
-    'username' => $username,
-    'email' => $email,
-    'password_hash' => $passwordHash,
-    'auth_token' => $authToken,
-    'created_at' => Database::now(),
-    'last_login' => Database::now(),
-    'is_active' => 1,
-]);
+    $users->insertOne([
+        'user_id' => $userId,
+        'username' => $username,
+        'email' => $email,
+        'password_hash' => $passwordHash,
+        'auth_token' => $authToken,
+        'created_at' => Database::now(),
+        'last_login' => Database::now(),
+        'is_active' => 1,
+    ]);
+} catch (Throwable $e) {
+    $errorText = strtolower($e->getMessage());
+    if (strpos($errorText, 'duplicate key') !== false || strpos($errorText, 'e11000') !== false) {
+        http_response_code(409);
+        echo json_encode(['success' => false, 'error' => 'Email already in use']);
+        exit;
+    }
+
+    error_log('[REGISTER] ' . $e->getMessage());
+    http_response_code(500);
+    echo json_encode(['success' => false, 'error' => 'Registration failed. Please try again.']);
+    exit;
+}
 
 echo json_encode([
     'success' => true,

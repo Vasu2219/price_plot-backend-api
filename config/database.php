@@ -65,16 +65,68 @@ class Database {
     }
 
     public static function nextId(string $counterName): int {
-        $counters = self::collection('counters');
-        $result = $counters->findOneAndUpdate(
-            ['_id' => $counterName],
-            ['$inc' => ['seq' => 1]],
-            [
-                'upsert' => true,
-                'returnDocument' => FindOneAndUpdate::RETURN_DOCUMENT_AFTER,
-            ]
-        );
-        $data = self::docToArray($result);
-        return (int)($data['seq'] ?? 1);
+        try {
+            $counters = self::collection('counters');
+            $result = $counters->findOneAndUpdate(
+                ['_id' => $counterName],
+                ['$inc' => ['seq' => 1]],
+                [
+                    'upsert' => true,
+                    'returnDocument' => FindOneAndUpdate::RETURN_DOCUMENT_AFTER,
+                ]
+            );
+            $data = self::docToArray($result);
+            if (!empty($data['seq'])) {
+                return (int)$data['seq'];
+            }
+        } catch (Throwable $e) {
+        }
+
+        $collectionName = self::collectionNameForCounter($counterName);
+        $idField = self::idFieldForCollection($collectionName);
+        $collection = self::collection($collectionName);
+
+        $last = $collection->findOne([], [
+            'sort' => [$idField => -1],
+            'projection' => [$idField => 1],
+        ]);
+        $lastData = self::docToArray($last);
+        $lastId = (int)($lastData[$idField] ?? 0);
+
+        return $lastId + 1;
+    }
+
+    private static function collectionNameForCounter(string $counterName): string {
+        $map = [
+            'users' => 'users',
+            'products' => 'products',
+            'prices' => 'prices',
+            'cart' => 'cart',
+            'wishlist' => 'wishlist',
+            'notifications' => 'notifications',
+            'price_cache' => 'price_cache',
+            'scrape_requests' => 'scrape_requests',
+            'search_history' => 'search_history',
+            'chat_history' => 'chat_history',
+        ];
+
+        return $map[$counterName] ?? $counterName;
+    }
+
+    private static function idFieldForCollection(string $collectionName): string {
+        $map = [
+            'users' => 'user_id',
+            'products' => 'product_id',
+            'prices' => 'price_id',
+            'cart' => 'cart_id',
+            'wishlist' => 'wishlist_id',
+            'notifications' => 'notification_id',
+            'price_cache' => 'cache_id',
+            'scrape_requests' => 'request_id',
+            'search_history' => 'history_id',
+            'chat_history' => 'chat_id',
+        ];
+
+        return $map[$collectionName] ?? 'id';
     }
 }
