@@ -1,16 +1,26 @@
-FROM php:8.2-cli
+FROM alpine:3.20
 
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends git unzip libssl-dev pkg-config $PHPIZE_DEPS \
-	&& pecl channel-update pecl.php.net \
-	&& printf "\n" | pecl install mongodb \
-	&& echo "extension=mongodb.so" > /usr/local/etc/php/conf.d/50-mongodb.ini \
-	&& php -m | grep -i mongodb \
-	&& apt-get purge -y --auto-remove $PHPIZE_DEPS \
-	&& apt-get clean \
-	&& rm -rf /var/lib/apt/lists/*
-
-COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+RUN apk add --no-cache \
+	php82 \
+	php82-phar \
+	php82-openssl \
+	php82-curl \
+	php82-mbstring \
+	php82-session \
+	php82-tokenizer \
+	php82-ctype \
+	php82-dom \
+	php82-xml \
+	php82-zip \
+	php82-opcache \
+	php82-pecl-mongodb \
+	composer \
+	bash \
+	ca-certificates \
+	git \
+	unzip \
+	&& ln -sf /usr/bin/php82 /usr/bin/php \
+	&& php -m | grep -i mongodb
 
 WORKDIR /app
 COPY composer.json composer.lock* /app/
