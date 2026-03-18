@@ -1,10 +1,12 @@
 FROM php:8.2-cli
 
-COPY --from=mlocati/php-extension-installer:2 /usr/bin/install-php-extensions /usr/local/bin/
-
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends git unzip \
-	&& install-php-extensions mongodb \
+	&& apt-get install -y --no-install-recommends git unzip libssl-dev pkg-config $PHPIZE_DEPS \
+	&& pecl channel-update pecl.php.net \
+	&& printf "\n" | pecl install mongodb \
+	&& echo "extension=mongodb.so" > /usr/local/etc/php/conf.d/50-mongodb.ini \
+	&& php -m | grep -i mongodb \
+	&& apt-get purge -y --auto-remove $PHPIZE_DEPS \
 	&& apt-get clean \
 	&& rm -rf /var/lib/apt/lists/*
 
