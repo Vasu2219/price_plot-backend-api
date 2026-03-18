@@ -32,7 +32,19 @@ function register_is_duplicate_error(Throwable $error): bool {
 }
 
 function register_is_permission_error(string $message): bool {
-    return strpos($message, 'not authorized') !== false || strpos($message, 'unauthorized') !== false || strpos($message, 'auth failed') !== false;
+    return strpos($message, 'not authorized') !== false
+        || strpos($message, 'unauthorized') !== false
+        || strpos($message, 'auth failed') !== false
+        || strpos($message, 'requires authentication') !== false
+        || strpos($message, 'command insert requires authentication') !== false
+        || strpos($message, 'permission') !== false;
+}
+
+function register_is_read_only_error(string $message): bool {
+    return strpos($message, 'not primary') !== false
+        || strpos($message, 'read only') !== false
+        || strpos($message, 'readonly') !== false
+        || strpos($message, 'primary stepped down') !== false;
 }
 
 function register_is_validation_error(string $message): bool {
@@ -107,31 +119,49 @@ for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
                 'user_id' => (int)$candidateId,
                 'username' => $username,
                 'email' => $email,
+                'password' => $passwordHash,
                 'password_hash' => $passwordHash,
                 'auth_token' => $authToken,
                 'created_at' => $nowUtc,
                 'last_login' => $nowUtc,
+                'updated_at' => $nowUtc,
                 'is_active' => 1,
             ],
             [
                 'user_id' => (int)$candidateId,
                 'username' => $username,
                 'email' => $email,
+                'password' => $passwordHash,
                 'password_hash' => $passwordHash,
                 'auth_token' => $authToken,
                 'created_at' => $nowIso,
                 'last_login' => $nowIso,
+                'updated_at' => $nowIso,
                 'is_active' => 1,
             ],
             [
                 'user_id' => (string)$candidateId,
                 'username' => $username,
                 'email' => $email,
+                'password' => $passwordHash,
                 'password_hash' => $passwordHash,
                 'auth_token' => $authToken,
                 'created_at' => $nowIso,
                 'last_login' => $nowIso,
+                'updated_at' => $nowIso,
                 'is_active' => 1,
+            ],
+            [
+                'user_id' => (int)$candidateId,
+                'username' => $username,
+                'email' => $email,
+                'password' => $passwordHash,
+                'password_hash' => $passwordHash,
+                'auth_token' => $authToken,
+                'created_at' => $nowIso,
+                'last_login' => $nowIso,
+                'updated_at' => $nowIso,
+                'is_active' => true,
             ],
         ];
 
@@ -179,6 +209,17 @@ for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
                     exit;
                 }
 
+                if (register_is_read_only_error($variantMessage)) {
+                    error_log('[REGISTER_READONLY] ' . $variantError->getMessage());
+                    $payload = ['success' => false, 'error' => 'Registration failed because the database is in read-only mode.'];
+                    if ($exposeErrorDetails) {
+                        $payload['details'] = $variantError->getMessage();
+                    }
+                    http_response_code(500);
+                    echo json_encode($payload);
+                    exit;
+                }
+
                 error_log('[REGISTER_VARIANT] ' . $variantError->getMessage());
                 continue;
             }
@@ -208,6 +249,17 @@ for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
         if (register_is_permission_error(strtolower($e->getMessage()))) {
             error_log('[REGISTER_AUTHZ] ' . $e->getMessage());
             $payload = ['success' => false, 'error' => 'Registration failed due to database permissions.'];
+            if ($exposeErrorDetails) {
+                $payload['details'] = $e->getMessage();
+            }
+            http_response_code(500);
+            echo json_encode($payload);
+            exit;
+        }
+
+        if (register_is_read_only_error(strtolower($e->getMessage()))) {
+            error_log('[REGISTER_READONLY] ' . $e->getMessage());
+            $payload = ['success' => false, 'error' => 'Registration failed because the database is in read-only mode.'];
             if ($exposeErrorDetails) {
                 $payload['details'] = $e->getMessage();
             }
