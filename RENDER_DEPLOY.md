@@ -19,6 +19,7 @@ Set these in Render service settings:
 Optional:
 - `OLLAMA_MODEL` = `qwen2.5:3b`
 - `OLLAMA_BASE_URL` = Ollama endpoint URL
+- `API_DEBUG_ERRORS` = `false` (set to `true` only temporarily while debugging backend errors)
 
 ## 4) Deploy
 Click **Manual Deploy** -> **Deploy latest commit**.

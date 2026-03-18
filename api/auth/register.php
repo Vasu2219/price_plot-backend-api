@@ -3,6 +3,42 @@
 require_once '../../config/cors.php';
 require_once '../../config/database.php';
 
+function register_should_expose_error_details(): bool {
+    $value = getenv('API_DEBUG_ERRORS');
+    if ($value === false) {
+        return false;
+    }
+    $value = strtolower(trim((string)$value));
+    return in_array($value, ['1', 'true', 'yes', 'on'], true);
+}
+
+function register_duplicate_field_from_error(string $message): ?string {
+    $message = strtolower($message);
+    if (strpos($message, 'email') !== false) {
+        return 'email';
+    }
+    if (strpos($message, 'username') !== false) {
+        return 'username';
+    }
+    if (strpos($message, 'user_id') !== false || strpos($message, 'userid') !== false || strpos($message, 'users.$') !== false) {
+        return 'user_id';
+    }
+    return null;
+}
+
+function register_is_duplicate_error(Throwable $error): bool {
+    $message = strtolower($error->getMessage());
+    return strpos($message, 'duplicate key') !== false || strpos($message, 'e11000') !== false || (int)$error->getCode() === 11000;
+}
+
+function register_is_permission_error(string $message): bool {
+    return strpos($message, 'not authorized') !== false || strpos($message, 'unauthorized') !== false || strpos($message, 'auth failed') !== false;
+}
+
+function register_is_validation_error(string $message): bool {
+    return strpos($message, 'document failed validation') !== false || strpos($message, 'schema') !== false || strpos($message, 'validation') !== false || strpos($message, 'wrong type') !== false;
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
     echo json_encode(['success' => false, 'error' => 'Method not allowed']);
@@ -10,6 +46,12 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 $input = json_decode(file_get_contents('php://input'), true);
+
+if (!is_array($input)) {
+    http_response_code(400);
+    echo json_encode(['success' => false, 'error' => 'Invalid JSON payload']);
+    exit;
+}
 
 $username = trim($input['username'] ?? '');
 $email    = strtolower(trim($input['email'] ?? ''));
@@ -46,71 +88,146 @@ $passwordHash = password_hash($password, PASSWORD_BCRYPT);
 $authToken    = bin2hex(random_bytes(32));
 $userId = null;
 $registered = false;
-$maxAttempts = 12;
+$maxAttempts = 8;
+$lastErrorMessage = '';
+$exposeErrorDetails = register_should_expose_error_details();
 
 for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
     try {
-        $candidateId = random_int(100000, 999999999);
-
+        $candidateId = Database::nextId('users');
         $existingId = $users->findOne(['user_id' => $candidateId]);
         if ($existingId) {
-            continue;
+            $candidateId++;
         }
 
-        $users->insertOne([
-            'user_id' => $candidateId,
-            'username' => $username,
-            'email' => $email,
-            'password_hash' => $passwordHash,
-            'auth_token' => $authToken,
-            'created_at' => Database::now(),
-            'last_login' => Database::now(),
-            'is_active' => 1,
-        ]);
+        $nowUtc = Database::now();
+        $nowIso = gmdate('c');
+        $insertVariants = [
+            [
+                'user_id' => (int)$candidateId,
+                'username' => $username,
+                'email' => $email,
+                'password_hash' => $passwordHash,
+                'auth_token' => $authToken,
+                'created_at' => $nowUtc,
+                'last_login' => $nowUtc,
+                'is_active' => 1,
+            ],
+            [
+                'user_id' => (int)$candidateId,
+                'username' => $username,
+                'email' => $email,
+                'password_hash' => $passwordHash,
+                'auth_token' => $authToken,
+                'created_at' => $nowIso,
+                'last_login' => $nowIso,
+                'is_active' => 1,
+            ],
+            [
+                'user_id' => (string)$candidateId,
+                'username' => $username,
+                'email' => $email,
+                'password_hash' => $passwordHash,
+                'auth_token' => $authToken,
+                'created_at' => $nowIso,
+                'last_login' => $nowIso,
+                'is_active' => 1,
+            ],
+        ];
 
-        $userId = $candidateId;
-        $registered = true;
-        break;
+        $insertedThisAttempt = false;
+        foreach ($insertVariants as $variant) {
+            try {
+                $users->insertOne($variant);
+                $userId = (int)$candidateId;
+                $registered = true;
+                $insertedThisAttempt = true;
+                break;
+            } catch (Throwable $variantError) {
+                $variantMessage = strtolower($variantError->getMessage());
+                $lastErrorMessage = $variantError->getMessage();
+
+                if (register_is_duplicate_error($variantError)) {
+                    $dupField = register_duplicate_field_from_error($variantError->getMessage());
+                    if ($dupField === 'email') {
+                        http_response_code(409);
+                        echo json_encode(['success' => false, 'error' => 'Email already in use']);
+                        exit;
+                    }
+                    if ($dupField === 'username') {
+                        http_response_code(409);
+                        echo json_encode(['success' => false, 'error' => 'Username already in use']);
+                        exit;
+                    }
+                    if ($dupField === 'user_id' || $dupField === null) {
+                        continue 2;
+                    }
+                }
+
+                if (register_is_validation_error($variantMessage)) {
+                    continue;
+                }
+
+                if (register_is_permission_error($variantMessage)) {
+                    error_log('[REGISTER_AUTHZ] ' . $variantError->getMessage());
+                    $payload = ['success' => false, 'error' => 'Registration failed due to database permissions.'];
+                    if ($exposeErrorDetails) {
+                        $payload['details'] = $variantError->getMessage();
+                    }
+                    http_response_code(500);
+                    echo json_encode($payload);
+                    exit;
+                }
+
+                error_log('[REGISTER_VARIANT] ' . $variantError->getMessage());
+                continue;
+            }
+        }
+
+        if ($insertedThisAttempt) {
+            break;
+        }
     } catch (Throwable $e) {
-        $errorText = strtolower($e->getMessage());
+        $lastErrorMessage = $e->getMessage();
 
-        if (strpos($errorText, 'duplicate key') !== false || strpos($errorText, 'e11000') !== false) {
-            if (strpos($errorText, 'email') !== false) {
+        if (register_is_duplicate_error($e)) {
+            $dupField = register_duplicate_field_from_error($e->getMessage());
+            if ($dupField === 'email') {
                 http_response_code(409);
                 echo json_encode(['success' => false, 'error' => 'Email already in use']);
                 exit;
             }
-
-            if (strpos($errorText, 'username') !== false) {
+            if ($dupField === 'username') {
                 http_response_code(409);
                 echo json_encode(['success' => false, 'error' => 'Username already in use']);
                 exit;
             }
-
-            if (strpos($errorText, 'user_id') !== false || strpos($errorText, 'userid') !== false || strpos($errorText, 'users.$') !== false) {
-                continue;
-            }
-
             continue;
         }
 
-        if (strpos($errorText, 'not authorized') !== false || strpos($errorText, 'unauthorized') !== false) {
+        if (register_is_permission_error(strtolower($e->getMessage()))) {
             error_log('[REGISTER_AUTHZ] ' . $e->getMessage());
+            $payload = ['success' => false, 'error' => 'Registration failed due to database permissions.'];
+            if ($exposeErrorDetails) {
+                $payload['details'] = $e->getMessage();
+            }
             http_response_code(500);
-            echo json_encode(['success' => false, 'error' => 'Registration failed due to database permissions.']);
+            echo json_encode($payload);
             exit;
         }
 
         error_log('[REGISTER] ' . $e->getMessage());
-        http_response_code(500);
-        echo json_encode(['success' => false, 'error' => 'Registration failed. Please try again.']);
-        exit;
+        continue;
     }
 }
 
 if (!$registered || $userId === null) {
+    $payload = ['success' => false, 'error' => 'Registration failed. Please retry.'];
+    if ($exposeErrorDetails && $lastErrorMessage !== '') {
+        $payload['details'] = $lastErrorMessage;
+    }
     http_response_code(500);
-    echo json_encode(['success' => false, 'error' => 'Registration failed. Please retry.']);
+    echo json_encode($payload);
     exit;
 }
 
