@@ -14,17 +14,19 @@ RUN apk add --no-cache \
 	php82-zip \
 	php82-opcache \
 	php82-pecl-mongodb \
-	composer \
 	bash \
 	ca-certificates \
 	git \
 	unzip \
 	&& ln -sf /usr/bin/php82 /usr/bin/php \
+	&& update-ca-certificates \
 	&& php -m | grep -i mongodb
+
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /app
 COPY composer.json composer.lock* /app/
-RUN COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+RUN COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction --ignore-platform-req=ext-mongodb
 COPY . /app
 
 ENV PORT=10000
